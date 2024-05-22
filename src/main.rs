@@ -93,12 +93,32 @@ fn main() -> Result<()> {
             let path = &get_repo_path(&root_dir, &origin_url)?;
             println!("path: {}", path.display());
 
-            let mut builder = git2::build::RepoBuilder::new();
-            builder.fetch_options({
-                let mut opts = git2::FetchOptions::new();
-                opts.depth(depth);
+            let mut callbacks = git2::RemoteCallbacks::new();
+            callbacks.credentials(|url, _username_from_url, allowed_types| {
+                use git2::Cred;
+                if allowed_types.is_default() {
+                    Cred::default()
+                } else if allowed_types.is_username() {
+                    Cred::username(&username)
+                } else if allowed_types.is_ssh_key() {
+                    Cred::ssh_key_from_agent(&username)
+                } else {
+                    Cred::credential_helper(&config, url, Some(&username))
+                }
+            });
+
+            let mut fetch_opts = git2::FetchOptions::new();
+            fetch_opts.remote_callbacks(callbacks);
+            fetch_opts.depth(depth);
+            fetch_opts.proxy_options({
+                let mut opts = git2::ProxyOptions::new();
+                opts.auto();
                 opts
             });
+
+            let mut builder = git2::build::RepoBuilder::new();
+            builder.fetch_options(fetch_opts);
+
             builder.clone(origin_url.as_str(), path)?;
         }
 
