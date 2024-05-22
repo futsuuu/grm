@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - x86_64-pc-windows-msvc
+          - universal2-apple-darwin
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: universal2-apple-darwin
+            os: macos-latest
+            rust-targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets || matrix.target }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: pip
+
+      - name: Setup cache for Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-zigbuild
+        run: pip install cargo-zigbuild
+
+      - name: Compile
+        run: |
+          cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Rename
+        if: runner.os != 'Windows'
+        run: mv ./target/${{ matrix.target }}/release/grm ./grm-${{ matrix.target }}
+
+      - name: Rename (Windows)
+        if: runner.os == 'Windows'
+        run: Move-Item ./target/${{ matrix.target }}/release/grm.exe ./grm-${{ matrix.target }}.exe
+
+      - name: Upload an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ./grm-${{ matrix.target }}
+            ./grm-${{ matrix.target }}.exe
+
+  publish:
+    needs: [build]
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - run: find
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-*/*
+          name: ${{ env.TAG }}
+          token: ${{ secrets.GITHUB_TOKEN }}
