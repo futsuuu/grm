@@ -57,15 +57,16 @@ fn main() -> Result<()> {
         }
     };
 
-    let config = open_config(true)?;
-    let root_dir = get_root_dir(&config)?;
-
     match command {
         CliCommand::Root => {
-            println!("{}", root_dir.display());
+            let config = open_config(false)?;
+            println!("{}", get_root_dir(&config)?.display());
         }
 
         CliCommand::List { absolute } => {
+            let config = open_config(false)?;
+            let root_dir = get_root_dir(&config)?;
+
             let mut walker = walkdir::WalkDir::new(&root_dir).min_depth(1).into_iter();
             while let Some(Ok(entry)) = walker.next() {
                 let path = entry.path();
@@ -83,7 +84,10 @@ fn main() -> Result<()> {
         }
 
         CliCommand::Get { repo, ssh, depth } => {
+            let config = open_config(true)?;
+            let root_dir = get_root_dir(&config)?;
             let username = get_username(&config)?;
+
             let origin_url = get_origin_url(&username, ssh, &repo)?;
             println!("origin: {origin_url}");
             let path = &get_repo_path(&root_dir, &origin_url)?;
@@ -99,7 +103,10 @@ fn main() -> Result<()> {
         }
 
         CliCommand::New { ssh, repo } => {
+            let config = open_config(true)?;
+            let root_dir = get_root_dir(&config)?;
             let username = get_username(&config)?;
+
             let origin_url = get_origin_url(&username, ssh, &repo)?;
             println!("origin: {origin_url}");
             let path = get_repo_path(&root_dir, &origin_url)?;
