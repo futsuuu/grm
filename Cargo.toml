@@ -1,0 +1,19 @@
+[package]
+name = "grm"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+dirs = "5.0"
+git2 = "0.18"
+url = "2.5"
+walkdir = "2.5"
+whoami ="1.5"
+
+[profile.release]
+lto = true
+opt-level = 3
+panic = "abort"
+codegen-units = 1
