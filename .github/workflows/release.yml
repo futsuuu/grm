@@ -36,29 +36,29 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets || matrix.target }}
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-          cache: pip
-
       - name: Setup cache for Rust
         uses: Swatinem/rust-cache@v2
 
+      - name: Setup Zig
+        if: runner.os != 'Windows'
+        uses: goto-bus-stop/setup-zig@v2
+
       - name: Install cargo-zigbuild
-        run: pip install cargo-zigbuild
+        if: runner.os != 'Windows'
+        run: |
+          cargo install cargo-zigbuild
 
       - name: Compile
+        if: runner.os != 'Windows'
         run: |
           cargo zigbuild --release --target ${{ matrix.target }}
+          mv ./target/${{ matrix.target }}/release/grm ./grm-${{ matrix.target }}
 
-      - name: Rename
-        if: runner.os != 'Windows'
-        run: mv ./target/${{ matrix.target }}/release/grm ./grm-${{ matrix.target }}
-
-      - name: Rename (Windows)
+      - name: Compile (Windows)
         if: runner.os == 'Windows'
-        run: Move-Item ./target/${{ matrix.target }}/release/grm.exe ./grm-${{ matrix.target }}.exe
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          Move-Item ./target/${{ matrix.target }}/release/grm.exe ./grm-${{ matrix.target }}.exe
 
       - name: Upload an artifact
         uses: actions/upload-artifact@v4
