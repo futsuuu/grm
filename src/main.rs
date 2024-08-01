@@ -41,6 +41,9 @@ enum CliCommand {
     #[command(visible_alias = "n")]
     New {
         repo: String,
+        /// Don't complete the origin URL
+        #[arg(long, short, default_value_t = false)]
+        raw: bool,
         /// Use SSH scheme for the origin URL instead of HTTPS scheme
         #[arg(long, default_value_t = false)]
         ssh: bool,
@@ -122,22 +125,25 @@ fn main() -> Result<()> {
             builder.clone(origin_url.as_str(), path)?;
         }
 
-        CliCommand::New { ssh, repo } => {
+        CliCommand::New { repo, ssh, raw } => {
             let config = open_config(true)?;
             let root_dir = get_root_dir(&config)?;
             let username = get_username(&config)?;
 
-            let origin_url = get_origin_url(&username, ssh, &repo)?;
-            println!("origin: {origin_url}");
-            let path = get_repo_path(&root_dir, &origin_url)?;
+            let mut opts = git2::RepositoryInitOptions::new();
+            opts.no_reinit(true);
+
+            let path = if raw {
+                root_dir.join(repo)
+            } else {
+                let origin_url = get_origin_url(&username, ssh, &repo)?;
+                opts.origin_url(origin_url.as_str());
+                println!("origin: {origin_url}");
+                get_repo_path(&root_dir, &origin_url)?
+            };
             println!("path: {}", path.display());
 
-            Repository::init_opts(path, &{
-                let mut opts = git2::RepositoryInitOptions::new();
-                opts.no_reinit(true);
-                opts.origin_url(origin_url.as_str());
-                opts
-            })?;
+            Repository::init_opts(path, &opts)?;
         }
     }
 
