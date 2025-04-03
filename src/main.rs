@@ -5,7 +5,6 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use dirs::home_dir;
 use git2::Repository;
 use url::Url;
 
@@ -18,7 +17,7 @@ enum CliCommand {
     Root,
 
     /// List managed local repositories
-    #[command(visible_alias = "l")]
+    #[command(visible_alias = "ls")]
     List {
         /// Print absolute paths
         #[arg(long, short = 'l', default_value_t = false)]
@@ -41,7 +40,7 @@ enum CliCommand {
     #[command(visible_alias = "n")]
     New {
         repo: String,
-        /// Don't complete the origin URL
+        /// Don't infer the origin URL
         #[arg(long, short, default_value_t = false)]
         raw: bool,
         /// Use SSH scheme for the origin URL instead of HTTPS scheme
@@ -143,7 +142,16 @@ fn main() -> Result<()> {
             };
             println!("path: {}", path.display());
 
-            Repository::init_opts(path, &opts)?;
+            let repo = Repository::init_opts(path, &opts)?;
+            if !raw {
+                let mut config = repo.config()?;
+                let branch = get_default_branch(&config);
+                config.set_str(&format!("branch.{branch}.remote"), "origin")?;
+                config.set_str(
+                    &format!("branch.{branch}.merge"),
+                    &format!("refs/heads/{branch}"),
+                )?;
+            }
         }
     }
 
@@ -151,15 +159,10 @@ fn main() -> Result<()> {
 }
 
 fn get_origin_url(username: &str, ssh: bool, repo: &str) -> Result<Url> {
-    let slash_count = repo.split('/').count() - 1;
-    if slash_count == 0 {
-        return get_origin_url(username, ssh, &format!("{username}/{repo}"));
-    }
-    if slash_count == 1 {
-        return get_origin_url(username, ssh, &format!("{DEFAULT_HOST}/{repo}"));
-    }
-    if slash_count == 2 {
-        return get_origin_url(
+    match repo.split('/').count() {
+        1 => get_origin_url(username, ssh, &format!("{username}/{repo}")),
+        2 => get_origin_url(username, ssh, &format!("{DEFAULT_HOST}/{repo}")),
+        3 => get_origin_url(
             username,
             ssh,
             &if ssh && repo.contains('@') {
@@ -169,9 +172,9 @@ fn get_origin_url(username: &str, ssh: bool, repo: &str) -> Result<Url> {
             } else {
                 format!("https://{repo}")
             },
-        );
+        ),
+        _ => Ok(Url::parse(repo)?),
     }
-    Ok(Url::parse(repo)?)
 }
 
 fn get_repo_path(root_dir: &Path, origin: &Url) -> Result<PathBuf> {
@@ -187,8 +190,14 @@ fn get_root_dir(config: &git2::Config) -> Result<PathBuf> {
     config
         .get_path(concat!(env!("CARGO_PKG_NAME"), ".root"))
         .ok()
-        .or_else(|| home_dir().map(|p| p.join(env!("CARGO_PKG_NAME"))))
+        .or_else(|| dirs::home_dir().map(|p| p.join(env!("CARGO_PKG_NAME"))))
         .context("failed to get root dir")
+}
+
+fn get_default_branch(config: &git2::Config) -> String {
+    config
+        .get_string("init.defaultBranch")
+        .unwrap_or("master".into())
 }
 
 fn get_username(config: &git2::Config) -> Result<String> {
