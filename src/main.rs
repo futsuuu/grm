@@ -1,17 +1,12 @@
-use std::{
-    io::{BufRead, IsTerminal},
-    path::{Path, PathBuf},
-};
+use std::io::{BufRead as _, IsTerminal as _};
 
-use anyhow::{Context, Result};
-use clap::Parser;
-use git2::Repository;
-use url::Url;
+use anyhow::Context as _;
+use clap::Parser as _;
 
 const DEFAULT_HOST: &str = "github.com";
 
 /// Git Repository Manager
-#[derive(Parser)]
+#[derive(clap::Parser)]
 enum CliCommand {
     /// Print repositories' root directory
     Root,
@@ -49,7 +44,7 @@ enum CliCommand {
     },
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     let command = {
         let stdin = std::io::stdin().lock();
         if stdin.is_terminal() {
@@ -72,7 +67,7 @@ fn main() -> Result<()> {
             let mut walker = walkdir::WalkDir::new(&root_dir).min_depth(1).into_iter();
             while let Some(Ok(entry)) = walker.next() {
                 let path = entry.path();
-                if Repository::open(path).is_err() {
+                if git2::Repository::open(path).is_err() {
                     continue;
                 }
                 let path = if absolute {
@@ -80,7 +75,7 @@ fn main() -> Result<()> {
                 } else {
                     path.strip_prefix(&root_dir).unwrap_or(path)
                 };
-                println!("{}", path.display().to_string().replace('\\', "/"));
+                println!("{}", path.to_string_lossy().to_string().replace('\\', "/"));
                 walker.skip_current_dir();
             }
         }
@@ -92,36 +87,26 @@ fn main() -> Result<()> {
 
             let origin_url = get_origin_url(&username, ssh, &repo)?;
             println!("origin: {origin_url}");
-            let path = &get_repo_path(&root_dir, &origin_url)?;
+            let path = get_repo_path(&root_dir, &origin_url)?;
+            let path = std::path::absolute(&path).unwrap_or(path);
             println!("path: {}", path.display());
 
-            let mut callbacks = git2::RemoteCallbacks::new();
-            callbacks.credentials(|url, _username_from_url, allowed_types| {
-                use git2::Cred;
-                if allowed_types.is_default() {
-                    Cred::default()
-                } else if allowed_types.is_username() {
-                    Cred::username(&username)
-                } else if allowed_types.is_ssh_key() {
-                    Cred::ssh_key_from_agent(&username)
-                } else {
-                    Cred::credential_helper(&config, url, Some(&username))
-                }
-            });
+            let mut command = std::process::Command::new("git");
+            command.arg("clone");
 
-            let mut fetch_opts = git2::FetchOptions::new();
-            fetch_opts.remote_callbacks(callbacks);
-            fetch_opts.depth(depth);
-            fetch_opts.proxy_options({
-                let mut opts = git2::ProxyOptions::new();
-                opts.auto();
-                opts
-            });
+            if depth > 0 {
+                command.arg("--depth").arg(depth.to_string());
+            }
 
-            let mut builder = git2::build::RepoBuilder::new();
-            builder.fetch_options(fetch_opts);
+            command.arg(origin_url.as_str()).arg(path);
 
-            builder.clone(origin_url.as_str(), path)?;
+            let status = command
+                .status()
+                .with_context(|| format!("failed to execute {command:?}"))?;
+
+            if !status.success() {
+                anyhow::bail!("{command:?} failed with {status}");
+            }
         }
 
         CliCommand::New { repo, ssh, raw } => {
@@ -140,9 +125,10 @@ fn main() -> Result<()> {
                 println!("origin: {origin_url}");
                 get_repo_path(&root_dir, &origin_url)?
             };
+            let path = std::path::absolute(&path).unwrap_or(path);
             println!("path: {}", path.display());
 
-            let repo = Repository::init_opts(path, &opts)?;
+            let repo = git2::Repository::init_opts(path, &opts)?;
             if !raw {
                 let mut config = repo.config()?;
                 let branch = get_default_branch(&config);
@@ -158,7 +144,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn get_origin_url(username: &str, ssh: bool, repo: &str) -> Result<Url> {
+fn get_origin_url(username: &str, ssh: bool, repo: &str) -> anyhow::Result<url::Url> {
     match repo.split('/').count() {
         1 => get_origin_url(username, ssh, &format!("{username}/{repo}")),
         2 => get_origin_url(username, ssh, &format!("{DEFAULT_HOST}/{repo}")),
@@ -173,11 +159,14 @@ fn get_origin_url(username: &str, ssh: bool, repo: &str) -> Result<Url> {
                 format!("https://{repo}")
             },
         ),
-        _ => Ok(Url::parse(repo)?),
+        _ => Ok(url::Url::parse(repo)?),
     }
 }
 
-fn get_repo_path(root_dir: &Path, origin: &Url) -> Result<PathBuf> {
+fn get_repo_path(
+    root_dir: &std::path::Path,
+    origin: &url::Url,
+) -> anyhow::Result<std::path::PathBuf> {
     let domain = origin
         .domain()
         .with_context(|| format!("cannot find a domain name from `{origin}`"))?;
@@ -186,7 +175,7 @@ fn get_repo_path(root_dir: &Path, origin: &Url) -> Result<PathBuf> {
         .join(origin.path().trim_start_matches('/')))
 }
 
-fn get_root_dir(config: &git2::Config) -> Result<PathBuf> {
+fn get_root_dir(config: &git2::Config) -> anyhow::Result<std::path::PathBuf> {
     config
         .get_path(concat!(env!("CARGO_PKG_NAME"), ".root"))
         .ok()
@@ -200,16 +189,16 @@ fn get_default_branch(config: &git2::Config) -> String {
         .unwrap_or("master".into())
 }
 
-fn get_username(config: &git2::Config) -> Result<String> {
+fn get_username(config: &git2::Config) -> anyhow::Result<String> {
     config
         .get_string("user.name")
         .or_else(|_| whoami::fallible::username())
         .context("failed to get username")
 }
 
-fn open_config(current_dir: bool) -> Result<git2::Config> {
+fn open_config(current_dir: bool) -> anyhow::Result<git2::Config> {
     if current_dir {
-        if let Ok(config) = Repository::discover(".").and_then(|r| r.config()) {
+        if let Ok(config) = git2::Repository::discover(".").and_then(|r| r.config()) {
             return Ok(config);
         }
     }
@@ -221,36 +210,36 @@ mod test_get_origin_url {
     use super::*;
 
     #[test]
-    fn return_parsed_url() -> Result<()> {
+    fn return_parsed_url() -> anyhow::Result<()> {
         assert_eq!(
-            Url::parse("https://github.com/foo/bar")?,
+            url::Url::parse("https://github.com/foo/bar")?,
             get_origin_url("foo", false, "https://github.com/foo/bar")?,
         );
         Ok(())
     }
 
     #[test]
-    fn complete_scheme() -> Result<()> {
+    fn complete_scheme() -> anyhow::Result<()> {
         assert_eq!(
-            Url::parse("https://github.com/foo/bar")?,
+            url::Url::parse("https://github.com/foo/bar")?,
             get_origin_url("foo", false, "github.com/foo/bar")?,
         );
         Ok(())
     }
 
     #[test]
-    fn complete_remote_host() -> Result<()> {
+    fn complete_remote_host() -> anyhow::Result<()> {
         assert_eq!(
-            Url::parse("https://github.com/foo/bar")?,
+            url::Url::parse("https://github.com/foo/bar")?,
             get_origin_url("foo", false, "foo/bar")?,
         );
         Ok(())
     }
 
     #[test]
-    fn complete_username() -> Result<()> {
+    fn complete_username() -> anyhow::Result<()> {
         assert_eq!(
-            Url::parse("https://github.com/foo/bar")?,
+            url::Url::parse("https://github.com/foo/bar")?,
             get_origin_url("foo", false, "bar")?
         );
         Ok(())
