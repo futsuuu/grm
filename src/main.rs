@@ -78,7 +78,7 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     path.strip_prefix(&root_dir).unwrap_or(path)
                 };
-                stdout.write_fmt(format_args!("{}", DisplayPath(path)))?;
+                stdout.write_fmt(format_args!("{}\n", DisplayPath(path)))?;
                 walker.skip_current_dir();
             }
         }
