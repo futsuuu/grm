@@ -261,12 +261,26 @@ impl App {
     }
 
     fn get_worktree_path(&self, branch: &str) -> anyhow::Result<std::path::PathBuf> {
-        let repo = self.current_repo()?;
-        let relative = repo
-            .workdir()
-            .with_context(|| todo!("bare repository"))?
+        let current = self.current_repo()?;
+        let main_worktree_path = if current.is_worktree() {
+            let main_worktree = git2::Repository::open_ext(
+                current.commondir(),
+                git2::RepositoryOpenFlags::NO_SEARCH | git2::RepositoryOpenFlags::NO_DOTGIT,
+                &[] as &[&std::ffi::OsStr],
+            )?;
+            main_worktree
+                .workdir()
+                .unwrap_or_else(|| main_worktree.path())
+                .to_path_buf()
+        } else {
+            current
+                .workdir()
+                .unwrap_or_else(|| current.path())
+                .to_path_buf()
+        };
+        let relative = main_worktree_path
             .strip_prefix(self.root_dir()?)
-            .context("cannot create a worktree from an unmanaged repository")?;
+            .context("cannot create a worktree of an unmanaged repository")?;
         Ok(self.worktree_root_dir()?.join(relative).join(branch))
     }
 
