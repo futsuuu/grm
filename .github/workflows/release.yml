@@ -41,12 +41,12 @@ jobs:
 
       - name: Setup Zig
         if: runner.os != 'Windows'
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
 
       - name: Install cargo-zigbuild
         if: runner.os != 'Windows'
         run: |
-          cargo install cargo-zigbuild
+          cargo install --locked cargo-zigbuild
 
       - name: Compile
         if: runner.os != 'Windows'
