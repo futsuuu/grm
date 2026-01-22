@@ -156,7 +156,7 @@ fn main() -> anyhow::Result<()> {
             let app = App::open_current()?;
             let repo = app.current_repo()?;
             let mut branches = Vec::new();
-            for entry in repo.branches(None)? {
+            for entry in repo.branches(Some(git2::BranchType::Local))? {
                 let (branch, _) = entry?;
                 let Some(branch_name) = branch.name()? else {
                     continue;
