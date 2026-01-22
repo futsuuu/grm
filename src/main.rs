@@ -291,7 +291,7 @@ impl App {
         let name = self
             .config
             .get_string("user.name")
-            .or_else(|_| whoami::fallible::username())
+            .or_else(|_| whoami::username())
             .context("failed to get user name")?;
         self.user_name_cache.replace(Some(name.clone()));
         Ok(name)
