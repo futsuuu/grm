@@ -9,7 +9,7 @@ clap = { version = "4.5", features = ["derive"] }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 url = "2.5"
 walkdir = "2.5"
-whoami = { version = "2.0", default-features = false }
+whoami = { version = "2.1", default-features = false }
 
 [profile.release]
 lto = true
