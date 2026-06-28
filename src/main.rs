@@ -34,13 +34,14 @@ enum CliCommand {
     #[command(visible_alias = "n")]
     New {
         name: String,
-        /// Create a new linked worktree of the current repository
-        #[arg(long, short = 'w', default_value_t = false)]
-        worktree: bool,
         /// Use SSH scheme for the origin URL instead of HTTPS scheme
         #[arg(long, default_value_t = false)]
         ssh: bool,
     },
+
+    /// Manage linked worktrees
+    #[command(subcommand, visible_alias = "wt")]
+    Worktree(WorktreeAction),
 }
 
 impl CliCommand {
@@ -54,6 +55,13 @@ impl CliCommand {
             )
         }
     }
+}
+
+#[derive(clap::Parser)]
+enum WorktreeAction {
+    /// Create a new linked worktree
+    #[command(visible_alias = "n")]
+    New { name: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -115,11 +123,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        CliCommand::New {
-            name,
-            worktree: false,
-            ssh,
-        } => {
+        CliCommand::New { name, ssh } => {
             let app = App::open_current()?;
             let origin_url = {
                 let scheme = if ssh {
@@ -148,11 +152,7 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
 
-        CliCommand::New {
-            name,
-            worktree: true,
-            ..
-        } => {
+        CliCommand::Worktree(WorktreeAction::New { name }) => {
             let app = App::open_current()?;
             let repo = app.current_repo()?;
             let mut branches = Vec::new();
@@ -175,7 +175,7 @@ fn main() -> anyhow::Result<()> {
             let (branch, branch_name) = branches
                 .last()
                 .with_context(|| format!("'{name}' does not match with any branches"))?;
-            println!("branch: {}", branch_name);
+            println!("branch: {branch_name}");
             let path = app.get_worktree_path(branch_name)?;
             println!("worktree: {}", DisplayPath(&path));
             _ = std::fs::remove_dir(&path); // remove directory if empty
