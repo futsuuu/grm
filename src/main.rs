@@ -82,14 +82,12 @@ fn main() -> std::process::ExitCode {
 fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
     match cli_args {
         CliCommand::Root => {
-            let app = App::open_default()?;
-            println!("{}", DisplayPath(app.root_dir()?));
+            println!("{}", DisplayPath(App::<Git2, GitCommand>::get_root_dir()?));
         }
 
         CliCommand::List { absolute } => {
-            let app = App::open_default()?;
-            let root_dir = app.root_dir()?;
-            let mut walker = walkdir::WalkDir::new(&root_dir).min_depth(1).into_iter();
+            let root_dir = App::<Git2, GitCommand>::get_root_dir()?;
+            let mut walker = walkdir::WalkDir::new(root_dir).min_depth(1).into_iter();
             let mut stdout = std::io::stdout().lock();
             while let Some(Ok(entry)) = walker.next() {
                 let path = entry.path();
@@ -99,7 +97,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
                 let path = if absolute {
                     path
                 } else {
-                    path.strip_prefix(&root_dir).unwrap_or(path)
+                    path.strip_prefix(root_dir).unwrap_or(path)
                 };
                 writeln!(stdout, "{}", DisplayPath(path))?;
                 walker.skip_current_dir();
@@ -107,7 +105,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
         }
 
         CliCommand::Get { repo, ssh, depth } => {
-            let app = App::open_current()?;
+            let app = App::new();
             let origin_url = {
                 let scheme = if ssh {
                     OriginUrlScheme::Ssh
@@ -120,24 +118,15 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
             let path = app.get_repo_path(&origin_url)?;
             log::info!("path:   {}", DisplayPath(&path));
 
-            let mut command = std::process::Command::new("git");
-            command.arg("clone");
-            if depth > 0 {
-                command.arg("--depth").arg(depth.to_string());
-            }
-            command.arg(origin_url.as_str()).arg(&path);
-
-            let status = command
-                .status()
-                .with_context(|| format!("failed to execute {command:?}"))?;
-            anyhow::ensure!(status.success(), "{command:?} failed with {status}");
+            app.remote
+                .clone_repo(origin_url, &path, CloneOpts { depth })?;
 
             log::info!("repository cloned");
             println!("{}", DisplayPath(path));
         }
 
         CliCommand::New { name, ssh } => {
-            let app = App::open_current()?;
+            let app = App::new();
             let origin_url = {
                 let scheme = if ssh {
                     OriginUrlScheme::Ssh
@@ -146,66 +135,47 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
                 };
                 scheme.get_url(&name, &app.user_name()?)?
             };
-            let mut opts = git2::RepositoryInitOptions::new();
-            opts.no_reinit(true);
-            opts.origin_url(origin_url.as_str());
-            log::info!("origin: {origin_url}");
             let path = app.get_repo_path(&origin_url)?;
+            log::info!("origin: {origin_url}");
             log::info!("path:   {}", DisplayPath(&path));
 
-            let repo = git2::Repository::init_opts(&path, &opts)?;
+            app.local.init_repo(&path, &origin_url)?;
             log::info!("repository initialized");
-            let mut config = repo.config()?;
-            let branch = config
-                .get_string("init.defaultBranch")
-                .unwrap_or("master".into());
-            config.set_str(&format!("branch.{branch}.remote"), "origin")?;
-            config.set_str(
-                &format!("branch.{branch}.merge"),
-                &format!("refs/heads/{branch}"),
-            )?;
             println!("{}", DisplayPath(path));
         }
 
         CliCommand::Worktree(WorktreeAction::New { name }) => {
-            let app = App::open_current()?;
-            let repo = app.current_repo()?;
+            let app = App::new();
             let mut branches = Vec::new();
-            for entry in repo.branches(Some(git2::BranchType::Local))? {
-                let (branch, _) = entry?;
-                let Some(branch_name) = branch.name()? else {
-                    continue;
-                };
+            for branch_name in app.local.iter_local_branches()? {
+                let branch_name = branch_name?;
                 if branch_name.contains(&name) {
                     log::debug!("branch matched: {branch_name}");
                     let branch_name = branch_name.to_string();
-                    branches.push((branch, branch_name));
+                    branches.push(branch_name);
                 } else {
                     log::debug!("branch did not match: {branch_name}");
                 }
             }
             log::debug!("matched {} branches", branches.len());
-            branches.sort_unstable_by(|(_, lhs), (_, rhs)| {
+            branches.sort_unstable_by(|lhs, rhs| {
                 lhs.split('/')
                     .count()
                     .cmp(&rhs.split('/').count())
                     .then_with(|| lhs.len().cmp(&rhs.len()))
             });
-            let (branch, branch_name) = branches
+            let branch_name = branches
                 .last()
                 .with_context(|| format!("'{name}' does not match with any branches"))?;
             log::info!("branch:   {branch_name}");
-            let path = app.get_worktree_path(branch_name)?;
+            let path = app.get_linked_worktree_path(branch_name)?;
             log::info!("worktree: {}", DisplayPath(&path));
             _ = std::fs::remove_dir(&path); // remove directory if empty
             anyhow::ensure!(!std::fs::exists(&path)?, "already exists");
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let mut opts = git2::WorktreeAddOptions::new();
-            opts.reference(Some(branch.get()));
-            opts.checkout_existing(true);
-            repo.worktree(&branch_name.replace('/', "__"), &path, Some(&opts))?;
+            app.local.create_linked_worktree(branch_name, &path)?;
             log::info!("worktree created");
             println!("{}", DisplayPath(path));
         }
@@ -214,111 +184,237 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct App {
-    current: Option<git2::Repository>,
-    config: git2::Config,
-
-    root_dir_cache: std::cell::RefCell<Option<std::path::PathBuf>>,
+/// Application context holding local/remote git operations and cached user name
+struct App<Local: LocalGitOp, Remote: RemoteGitOp> {
+    local: Local,
+    remote: Remote,
     user_name_cache: std::cell::RefCell<Option<String>>,
 }
 
-impl App {
-    fn open_current() -> anyhow::Result<Self> {
-        let repo = git2::Repository::discover(".").ok();
-        let config = if let Some(repo) = &repo {
-            repo.config()?
-        } else {
-            git2::Config::open_default()?
-        };
-        Ok(Self {
-            current: repo,
-            config,
-            root_dir_cache: None.into(),
-            user_name_cache: None.into(),
-        })
+impl App<Git2, GitCommand> {
+    fn new() -> Self {
+        Self {
+            local: Git2::new(),
+            remote: GitCommand::new(),
+            user_name_cache: std::cell::RefCell::new(None),
+        }
     }
+}
 
-    fn open_default() -> anyhow::Result<Self> {
-        Ok(Self {
-            current: None,
-            config: git2::Config::open_default()?,
-            root_dir_cache: None.into(),
-            user_name_cache: None.into(),
-        })
-    }
-
-    fn current_repo(&self) -> anyhow::Result<&git2::Repository> {
-        self.current
-            .as_ref()
-            .context("current directory is not a git repository")
-    }
-
-    fn root_dir(&self) -> anyhow::Result<std::path::PathBuf> {
-        if let Some(path) = &*self.root_dir_cache.borrow() {
-            return Ok(path.clone());
-        };
-        let path = self
-            .config
-            .get_path(concat!(env!("CARGO_PKG_NAME"), ".root"))
-            .ok()
-            .or_else(|| std::env::home_dir().map(|p| p.join(env!("CARGO_PKG_NAME"))))
-            .context("failed to get root directory")?;
-        self.root_dir_cache.replace(Some(path.clone()));
-        Ok(path)
-    }
-
+impl<LocalOp: LocalGitOp, RemoteOp: RemoteGitOp> App<LocalOp, RemoteOp> {
+    /// Resolve the local path for the given remote origin URL
     fn get_repo_path(&self, origin: &url::Url) -> anyhow::Result<std::path::PathBuf> {
         let domain = origin
             .domain()
             .with_context(|| format!("`{origin}` does not have a domain name"))?;
-        Ok(self
-            .root_dir()?
+        Ok(Self::get_root_dir()?
             .join(domain)
             .join(origin.path().trim_start_matches('/')))
     }
 
-    fn worktree_root_dir(&self) -> anyhow::Result<std::path::PathBuf> {
-        self.root_dir().map(|p| p.join("worktrees"))
-    }
-
-    fn get_worktree_path(&self, branch: &str) -> anyhow::Result<std::path::PathBuf> {
-        let current = self.current_repo()?;
-        let main_worktree_path = if current.is_worktree() {
-            let main_worktree = git2::Repository::open_ext(
-                current.commondir(),
-                git2::RepositoryOpenFlags::NO_SEARCH | git2::RepositoryOpenFlags::NO_DOTGIT,
-                &[] as &[&std::ffi::OsStr],
-            )?;
-            main_worktree
-                .workdir()
-                .unwrap_or_else(|| main_worktree.path())
-                .to_path_buf()
-        } else {
-            current
-                .workdir()
-                .unwrap_or_else(|| current.path())
-                .to_path_buf()
-        };
+    /// Resolve the worktree path for the given branch name
+    fn get_linked_worktree_path(&self, branch: &str) -> anyhow::Result<std::path::PathBuf> {
+        let main_worktree_path = self.local.get_main_worktree_path()?;
         let relative = main_worktree_path
-            .strip_prefix(self.root_dir()?)
+            .strip_prefix(Self::get_root_dir()?)
             .context("cannot create a worktree of an unmanaged repository")?;
-        Ok(self.worktree_root_dir()?.join(relative).join(branch))
+        Ok(Self::get_worktree_root_dir()?.join(relative).join(branch))
     }
 
+    /// Get the Git user name, falling back to the system username
     fn user_name(&self) -> anyhow::Result<String> {
         if let Some(name) = &*self.user_name_cache.borrow() {
             return Ok(name.clone());
         }
         let name = self
-            .config
-            .get_string("user.name")
+            .local
+            .read_current_user_name_config()
             .or_else(|_| whoami::username())
             .context("failed to get user name")?;
         self.user_name_cache.replace(Some(name.clone()));
         Ok(name)
     }
+
+    /// Get the root directory for managed repositories
+    fn get_root_dir() -> anyhow::Result<&'static std::path::Path> {
+        static CACHE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        if let Some(path) = CACHE.get() {
+            return Ok(path);
+        }
+        let path = LocalOp::read_root_dir_config()
+            .ok()
+            .or_else(|| std::env::home_dir().map(|p| p.join(env!("CARGO_PKG_NAME"))))
+            .context("failed to get root directory")?;
+        _ = CACHE.set(path);
+        Ok(CACHE.get().unwrap())
+    }
+
+    /// Get the root directory for linked worktrees (under root/worktrees)
+    fn get_worktree_root_dir() -> anyhow::Result<std::path::PathBuf> {
+        Self::get_root_dir().map(|p| p.join("worktrees"))
+    }
 }
 
+/// Local Git operations (read config, branches, worktrees, init)
+trait LocalGitOp {
+    /// Read the root directory config from global git config
+    fn read_root_dir_config() -> anyhow::Result<std::path::PathBuf>;
+    fn read_current_user_name_config(&self) -> anyhow::Result<String>;
+    fn iter_local_branches(&self) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>>>;
+    fn get_main_worktree_path(&self) -> anyhow::Result<std::path::PathBuf>;
+    fn create_linked_worktree(&self, branch: &str, path: &std::path::Path) -> anyhow::Result<()>;
+    fn init_repo(&self, path: &std::path::Path, origin: &url::Url) -> anyhow::Result<()>;
+}
+
+/// Local Git operations backed by libgit2
+struct Git2 {
+    current: Option<git2::Repository>,
+}
+
+impl Git2 {
+    fn new() -> Self {
+        Self {
+            current: git2::Repository::discover(".").ok(),
+        }
+    }
+
+    fn current(&self) -> anyhow::Result<&git2::Repository> {
+        self.current
+            .as_ref()
+            .context("current directory is not in a git repository")
+    }
+
+    fn config(&self) -> anyhow::Result<git2::Config> {
+        match &self.current {
+            Some(repo) => Ok(repo.config()?),
+            None => Ok(git2::Config::open_default()?),
+        }
+    }
+}
+
+impl LocalGitOp for Git2 {
+    fn read_root_dir_config() -> anyhow::Result<std::path::PathBuf> {
+        let config = git2::Config::open_default()?;
+        Ok(config.get_path(concat!(env!("CARGO_PKG_NAME"), ".root"))?)
+    }
+
+    fn get_main_worktree_path(&self) -> anyhow::Result<std::path::PathBuf> {
+        let current = self.current()?;
+        if current.is_worktree() {
+            let main_worktree = git2::Repository::open_ext(
+                current.commondir(),
+                git2::RepositoryOpenFlags::NO_SEARCH | git2::RepositoryOpenFlags::NO_DOTGIT,
+                &[] as &[&std::ffi::OsStr],
+            )?;
+            Ok(main_worktree
+                .workdir()
+                .unwrap_or_else(|| main_worktree.path())
+                .to_path_buf())
+        } else {
+            Ok(current
+                .workdir()
+                .unwrap_or_else(|| current.path())
+                .to_path_buf())
+        }
+    }
+
+    fn read_current_user_name_config(&self) -> anyhow::Result<String> {
+        Ok(self.config()?.get_string("user.name")?)
+    }
+
+    fn iter_local_branches(&self) -> anyhow::Result<impl Iterator<Item = anyhow::Result<String>>> {
+        Ok(self
+            .current()?
+            .branches(Some(git2::BranchType::Local))?
+            .map(|entry| {
+                let (branch, _type) = entry?;
+                Ok(branch.name()?.map(|s| s.to_string()))
+            })
+            .filter_map(Result::transpose))
+    }
+
+    fn create_linked_worktree(
+        &self,
+        branch_name: &str,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let current = self.current()?;
+        let branch = current.find_branch(branch_name, git2::BranchType::Local)?;
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch.get()));
+        opts.checkout_existing(true);
+        // Directory name within `.git/worktrees`. Branch names are relative paths and
+        // cannot contain backslashes, so replace '/' with '__' to avoid nesting.
+        let worktree_name = branch_name.replace('/', "__");
+        current.worktree(&worktree_name, path, Some(&opts))?;
+        Ok(())
+    }
+
+    fn init_repo(&self, path: &std::path::Path, origin: &url::Url) -> anyhow::Result<()> {
+        let mut opts = git2::RepositoryInitOptions::new();
+        opts.no_reinit(true);
+        opts.origin_url(origin.as_str());
+        let repo = git2::Repository::init_opts(path, &opts)?;
+        let mut config = repo.config()?;
+        let branch = config
+            .get_string("init.defaultBranch")
+            .unwrap_or_else(|_| "master".into());
+        config.set_str(&format!("branch.{branch}.remote"), "origin")?;
+        config.set_str(
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{branch}"),
+        )?;
+        Ok(())
+    }
+}
+
+/// Options for cloning a remote repository
+struct CloneOpts {
+    depth: u64,
+}
+
+/// Remote Git operations (clone, etc.)
+trait RemoteGitOp: Sized {
+    fn clone_repo(
+        &self,
+        src: url::Url,
+        dest: &std::path::Path,
+        opts: CloneOpts,
+    ) -> anyhow::Result<()>;
+}
+
+/// Remote Git operations backed by the `git` CLI
+struct GitCommand;
+
+impl GitCommand {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl RemoteGitOp for GitCommand {
+    fn clone_repo(
+        &self,
+        src: url::Url,
+        dest: &std::path::Path,
+        opts: CloneOpts,
+    ) -> anyhow::Result<()> {
+        let mut command = std::process::Command::new("git");
+        command.arg("clone");
+        if opts.depth > 0 {
+            command.arg("--depth").arg(opts.depth.to_string());
+        }
+        command.arg(src.as_str()).arg(dest);
+
+        let status = command
+            .status()
+            .with_context(|| format!("failed to execute {command:?}"))?;
+        anyhow::ensure!(status.success(), "{command:?} failed with {status}");
+        Ok(())
+    }
+}
+
+/// Wrapper to display paths with forward slashes on Windows
 struct DisplayPath<P>(P);
 
 impl<P: AsRef<std::ffi::OsStr>> std::fmt::Display for DisplayPath<P> {
@@ -333,6 +429,7 @@ impl<P: AsRef<std::ffi::OsStr>> std::fmt::Display for DisplayPath<P> {
     }
 }
 
+/// URL scheme for constructing remote origin URLs
 enum OriginUrlScheme {
     Https,
     Ssh,
