@@ -64,8 +64,23 @@ enum WorktreeAction {
     New { name: String },
 }
 
-fn main() -> anyhow::Result<()> {
-    match CliCommand::parse() {
+fn main() -> std::process::ExitCode {
+    let args = CliCommand::parse();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .format_module_path(false)
+        .init();
+    match main_inner(args) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            log::error!("{e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
+    match cli_args {
         CliCommand::Root => {
             let app = App::open_default()?;
             println!("{}", DisplayPath(app.root_dir()?));
@@ -101,26 +116,23 @@ fn main() -> anyhow::Result<()> {
                 };
                 scheme.get_url(&repo, &app.user_name()?)?
             };
-            println!("origin: {origin_url}");
+            log::info!("origin: {origin_url}");
             let path = app.get_repo_path(&origin_url)?;
-            println!("path: {}", DisplayPath(&path));
+            log::info!("path:   {}", DisplayPath(&path));
 
             let mut command = std::process::Command::new("git");
             command.arg("clone");
-
             if depth > 0 {
                 command.arg("--depth").arg(depth.to_string());
             }
-
             command.arg(origin_url.as_str()).arg(path);
 
             let status = command
                 .status()
                 .with_context(|| format!("failed to execute {command:?}"))?;
+            anyhow::ensure!(status.success(), "{command:?} failed with {status}");
 
-            if !status.success() {
-                anyhow::bail!("{command:?} failed with {status}");
-            }
+            log::info!("repository cloned");
         }
 
         CliCommand::New { name, ssh } => {
@@ -136,11 +148,12 @@ fn main() -> anyhow::Result<()> {
             let mut opts = git2::RepositoryInitOptions::new();
             opts.no_reinit(true);
             opts.origin_url(origin_url.as_str());
-            println!("origin: {origin_url}");
+            log::info!("origin: {origin_url}");
             let path = app.get_repo_path(&origin_url)?;
-            println!("path: {}", DisplayPath(&path));
+            log::info!("path:   {}", DisplayPath(&path));
 
-            let repo = git2::Repository::init_opts(path, &opts)?;
+            let repo = git2::Repository::init_opts(&path, &opts)?;
+            log::info!("repository initialized");
             let mut config = repo.config()?;
             let branch = config
                 .get_string("init.defaultBranch")
@@ -162,10 +175,14 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 };
                 if branch_name.contains(&name) {
+                    log::debug!("branch matched: {branch_name}");
                     let branch_name = branch_name.to_string();
                     branches.push((branch, branch_name));
+                } else {
+                    log::debug!("branch did not match: {branch_name}");
                 }
             }
+            log::debug!("matched {} branches", branches.len());
             branches.sort_unstable_by(|(_, lhs), (_, rhs)| {
                 lhs.split('/')
                     .count()
@@ -175,9 +192,9 @@ fn main() -> anyhow::Result<()> {
             let (branch, branch_name) = branches
                 .last()
                 .with_context(|| format!("'{name}' does not match with any branches"))?;
-            println!("branch: {branch_name}");
+            log::info!("branch:   {branch_name}");
             let path = app.get_worktree_path(branch_name)?;
-            println!("worktree: {}", DisplayPath(&path));
+            log::info!("worktree: {}", DisplayPath(&path));
             _ = std::fs::remove_dir(&path); // remove directory if empty
             anyhow::ensure!(!std::fs::exists(&path)?, "already exists");
             if let Some(parent) = path.parent() {
@@ -187,6 +204,7 @@ fn main() -> anyhow::Result<()> {
             opts.reference(Some(branch.get()));
             opts.checkout_existing(true);
             repo.worktree(&branch_name.replace('/', "__"), &path, Some(&opts))?;
+            log::info!("worktree created");
         }
     }
 
