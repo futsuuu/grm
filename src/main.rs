@@ -18,7 +18,7 @@ enum CliCommand {
         absolute: bool,
     },
 
-    /// Clone a remote repository
+    /// Clone a remote repository and print its path
     #[command(visible_alias = "g", alias = "clone")]
     Get {
         repo: String,
@@ -30,7 +30,7 @@ enum CliCommand {
         depth: u64,
     },
 
-    /// Create a new local repository
+    /// Create a new local repository and print its path
     #[command(visible_alias = "n")]
     New {
         name: String,
@@ -59,7 +59,7 @@ impl CliCommand {
 
 #[derive(clap::Parser)]
 enum WorktreeAction {
-    /// Create a new linked worktree
+    /// Create a new linked worktree and print its path
     #[command(visible_alias = "n")]
     New { name: String },
 }
@@ -101,7 +101,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
                 } else {
                     path.strip_prefix(&root_dir).unwrap_or(path)
                 };
-                stdout.write_fmt(format_args!("{}\n", DisplayPath(path)))?;
+                writeln!(stdout, "{}", DisplayPath(path))?;
                 walker.skip_current_dir();
             }
         }
@@ -125,7 +125,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
             if depth > 0 {
                 command.arg("--depth").arg(depth.to_string());
             }
-            command.arg(origin_url.as_str()).arg(path);
+            command.arg(origin_url.as_str()).arg(&path);
 
             let status = command
                 .status()
@@ -133,6 +133,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
             anyhow::ensure!(status.success(), "{command:?} failed with {status}");
 
             log::info!("repository cloned");
+            println!("{}", DisplayPath(path));
         }
 
         CliCommand::New { name, ssh } => {
@@ -163,6 +164,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
                 &format!("branch.{branch}.merge"),
                 &format!("refs/heads/{branch}"),
             )?;
+            println!("{}", DisplayPath(path));
         }
 
         CliCommand::Worktree(WorktreeAction::New { name }) => {
@@ -205,6 +207,7 @@ fn main_inner(cli_args: CliCommand) -> anyhow::Result<()> {
             opts.checkout_existing(true);
             repo.worktree(&branch_name.replace('/', "__"), &path, Some(&opts))?;
             log::info!("worktree created");
+            println!("{}", DisplayPath(path));
         }
     }
 
